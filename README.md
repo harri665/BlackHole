@@ -1,8 +1,20 @@
-# BlackHole2
 
 A real-time Kerr black hole renderer running entirely on the GPU. Null geodesics are integrated in Boyer-Lindquist coordinates using a Hamiltonian formulation, with full frame-dragging and gravitational lensing from a spinning (Kerr) black hole. Two modes: an interactive preview at whatever resolution you want, and an offline path that accumulates samples and writes a full 32-bit EXR.
 
-![fisheye render placeholder](assets/skybox/color.hdr)
+## Blog Post going over the creation of this project: 
+> [blog.harrison-martin.com](https://blog.harrison-martin.com/black-holes)
+
+---
+
+<img width="3840" height="2160" alt="BlackHole 4k" src="https://github.com/user-attachments/assets/48c4038c-0993-40c2-9cf1-b4f1b7c728ff" />
+
+[Full Resoultion 4k](https://cloud.harrison-martin.com/apps/files_sharing/publicpreview/ffkFMd5KfHpi432?file=/&fileId=1024597&x=3840&y=2160&a=true&etag=248e349ae73d7ebfcc93374acc8bbed5)
+
+
+
+<img width="3840" height="2160" alt="Closeup 4k" src="https://github.com/user-attachments/assets/0f69e0c2-0b8a-4e22-9722-45f0b1af211e" />
+
+[Full Resoultion 4k](https://cloud.harrison-martin.com/apps/files_sharing/publicpreview/YYxL8L6WJs4Q3id?file=/&fileId=1024708&x=3840&y=2160&a=true&etag=e9e4838af21c4ad6d5dea25efe4acf93)
 
 ## How it works
 
