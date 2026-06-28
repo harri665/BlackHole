@@ -1,104 +1,78 @@
-// Volumetric accretion disk sampling using NanoVDB.
-// Integrates emission + absorption along the geodesic inside the VDB bounding box.
+// disk.glsl — thin Keplerian accretion disk in the equatorial plane.
+//
+// Emission model: locally a blackbody at the Shakura-Sunyaev temperature
+// profile, observed through the relativistic g-factor
+//     g = nu_obs / nu_emit = 1 / (u^t (E - Omega L))
+// where (E, L) are the photon's conserved quantities (normalized so the
+// camera-frame energy is 1) and u^mu is the circular-orbit 4-velocity of the
+// disk fluid. A Doppler-shifted blackbody is exactly a blackbody at g*T, so
+// looking the LUT up at g*T captures shift AND relativistic beaming with no
+// extra g^3/g^4 factor (the LUT has an absolute radiometric scale).
 
 #ifndef DISK_GLSL
 #define DISK_GLSL
 
-#include "blackbody.glsl"
-#include "kerr.glsl"
-
-// NanoVDB access — PNanoVDB GLSL interface
-// The NanoVDB grid is stored as a raw buffer (SSBO).
-// We use pnanovdb_readaccessor for fast tree traversal.
-// Grid 0 = density, Grid 1 = temperature (both float grids)
-
-struct DiskParams {
-    float r_inner;      // inner edge (>= ISCO)
-    float r_outer;      // outer edge
-    float half_angle;   // angular half-thickness from equatorial plane
-    float density_scale; // multiplier for absorption coefficient
-    float temp_scale;    // multiplier for emission temperature
-    vec3  vdb_offset;    // BL-space offset for VDB origin
-    float vdb_scale;     // BL-space scale for VDB coordinates
-};
-
-// Convert BL coordinates to VDB index space
-vec3 bl_to_vdb_index(float r, float theta, float phi, DiskParams dp) {
-    // VDB is in Cartesian coordinates centered on the BH
-    float sth = sin(theta);
-    float x = r * sth * cos(phi);
-    float y = r * sth * sin(phi);
-    float z = r * cos(theta);
-
-    // Transform to VDB index space
-    vec3 world = vec3(x, y, z) - dp.vdb_offset;
-    return world / dp.vdb_scale;
+// Shakura-Sunyaev radial temperature profile, normalized so its peak equals
+// Tmax. f(x) = x^{-3/4} (1 - x^{-1/2})^{1/4} peaks at x = 49/36 with value
+// ~0.4880, x = r/rIn.
+float diskTemperature(float r)
+{
+    float rIn = u.disk.x;
+    float x = r / rIn;
+    if (x <= 1.0) return 0.0;
+    float f = pow(x, -0.75) * pow(1.0 - inversesqrt(x), 0.25);
+    return u.disk.z * f * (1.0 / 0.4880);
 }
 
-// Volumetric ray march through the disk along the geodesic.
-// Called when the ray enters the disk AABB; steps along the geodesic
-// using the same integrator, sampling the VDB at each step.
-//
-// Returns accumulated colour (linear sRGB, HDR) and transmittance.
-struct DiskResult {
-    vec3  color;         // accumulated emission (already shifted by g-factor)
-    float transmittance; // remaining transmittance (1 = fully transparent)
-};
+// Relativistic g-factor for prograde Keplerian flow at equatorial radius r.
+float diskGFactor(float r, float E, float L)
+{
+    float a = u.bh.x;
+    float Om = 1.0 / (pow(r, 1.5) + a); // Keplerian angular velocity
 
-// Simple stub that works without NanoVDB for initial testing:
-// uses an analytic thin-disk density/temperature falloff
-DiskResult integrate_disk_analytic(
-    GeoState s_entry, RayConstants rc, KerrParams bh, DiskParams dp,
-    float dlambda, int max_steps, float u_obs_energy
-) {
-    DiskResult result;
-    result.color = vec3(0.0);
-    result.transmittance = 1.0;
+    // covariant metric at the equator (Sigma = r^2)
+    float g_tt = -(1.0 - 2.0 / r);
+    float g_tp = -2.0 * a / r;
+    float g_pp = r * r + a * a + 2.0 * a * a / r;
 
-    GeoState s = s_entry;
-    float r_isco = kerr_isco(bh);
-
-    for (int i = 0; i < max_steps && result.transmittance > 0.01; i++) {
-        s = kerr_rk4(s, rc, bh, dlambda);
-
-        float r_horiz = kerr_horizon(bh);
-        if (s.r <= r_horiz + 0.01 || s.r > dp.r_outer * 2.0) break;
-
-        if (!in_disk_aabb(s.r, s.theta, dp.r_inner, dp.r_outer, dp.half_angle))
-            continue;
-
-        // Analytic density: Gaussian profile in theta, power-law in r
-        float th_eq = abs(s.theta - 3.14159265 * 0.5);
-        float sigma_th = dp.half_angle * 0.3;
-        float density = dp.density_scale * exp(-th_eq * th_eq / (2.0 * sigma_th * sigma_th))
-                       * pow(dp.r_inner / s.r, 2.0);
-
-        // Analytic temperature: Novikov-Thorne-like profile
-        float x = s.r / r_isco;
-        float T = dp.temp_scale * pow(x, -0.75) * pow(max(1.0 - 1.0/sqrt(x), 0.0), 0.25);
-        T = max(T, 100.0);
-
-        // Frequency shift
-        float g = compute_g_factor(s, rc, bh, u_obs_energy);
-
-        // Emission: shifted blackbody
-        vec3 emission = shifted_blackbody_color(T, g);
-
-        // Beer-Lambert absorption
-        float ds = abs(dlambda) * s.r; // approximate proper distance
-        float tau = density * ds;
-        float opacity = 1.0 - exp(-tau);
-
-        result.color += result.transmittance * opacity * emission;
-        result.transmittance *= (1.0 - opacity);
-    }
-
-    return result;
+    float norm = -(g_tt + 2.0 * Om * g_tp + Om * Om * g_pp);
+    float ut = inversesqrt(max(norm, 1e-8)); // u^t for circular orbit
+    return 1.0 / max(ut * (E - Om * L), 1e-8);
 }
 
-// NanoVDB-based disk integration will be added when PNanoVDB GLSL headers
-// are integrated. The density/temperature grids are bound as SSBOs (bindings 3,4)
-// in trace.comp.glsl and accessed via pnanovdb_readaccessor_t lookups.
-// For now, integrate_disk_analytic() provides the full relativistic pipeline.
+// Cheap seamless turbulence built from incommensurate azimuthal harmonics.
+// phi enters only through integer multiples, so there is no 2*pi seam, and
+// differential rotation (phase advected by the local Omega) shears the
+// pattern into trailing spiral streaks over time.
+float diskStreaks(float r, float ph)
+{
+    float a = u.bh.x;
+    float Om = 1.0 / (pow(r, 1.5) + a);
+    float p = ph - Om * u.disk2.z; // co-rotating azimuth
+    float lr = log(r);
+    float n = 0.0;
+    n += 0.50 * sin( 3.0 * p + 11.0 * lr + 1.3);
+    n += 0.35 * sin( 7.0 * p - 17.0 * lr + 4.1);
+    n += 0.25 * sin(13.0 * p + 29.0 * lr + 2.2);
+    n += 0.20 * sin(23.0 * p - 41.0 * lr + 5.6);
+    return n; // roughly [-1.3, 1.3]
+}
+
+// Radiance leaving a disk hit at (r, phi) toward the camera.
+// alpha is the disk opacity used for compositing.
+vec3 shadeDisk(float r, float ph, float E, float L, out float alpha)
+{
+    float T = diskTemperature(r);
+    float g = max(diskGFactor(r, E, L), 0.0);
+
+    float noise = 1.0 + u.disk2.y * diskStreaks(r, ph);
+    vec3 c = blackbodyRGB(g * T) * u.disk.w * max(noise, 0.0);
+
+    // soft fade at the rims so the disk edges don't alias
+    float rIn = u.disk.x, rOut = u.disk.y;
+    float fade = smoothstep(rIn, rIn * 1.05, r) * (1.0 - smoothstep(rOut * 0.85, rOut, r));
+    alpha = u.disk2.x * fade;
+    return c * fade;
+}
 
 #endif // DISK_GLSL

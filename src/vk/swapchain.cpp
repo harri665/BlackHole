@@ -1,84 +1,158 @@
-#include "vk/swapchain.h"
+#include "Swapchain.h"
+
 #include <algorithm>
-#include <stdexcept>
 
-namespace bh2::vk {
+namespace vk {
 
-void Swapchain::init(VkPhysicalDevice physical, VkDevice device, VkSurfaceKHR surface,
-                      uint32_t width, uint32_t height, uint32_t graphics_family) {
+Swapchain::Swapchain(const Context& ctx, uint32_t width, uint32_t height)
+    : m_ctx(ctx)
+{
+    create(width, height);
+
+    // Render pass: single color attachment, cleared, ends PRESENT_SRC.
+    VkAttachmentDescription color{};
+    color.format = m_format;
+    color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+
+    VkSubpassDependency dep{};
+    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dep.dstSubpass = 0;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.srcAccessMask = 0;
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = 1;
+    rpci.pAttachments = &color;
+    rpci.subpassCount = 1;
+    rpci.pSubpasses = &subpass;
+    rpci.dependencyCount = 1;
+    rpci.pDependencies = &dep;
+    VK_CHECK(vkCreateRenderPass(m_ctx.device(), &rpci, nullptr, &m_renderPass));
+
+    // framebuffers need the render pass, so they are built here, not in create()
+    recreate(width, height);
+}
+
+Swapchain::~Swapchain()
+{
+    cleanup();
+    if (m_swapchain)
+        vkDestroySwapchainKHR(m_ctx.device(), m_swapchain, nullptr);
+    if (m_renderPass)
+        vkDestroyRenderPass(m_ctx.device(), m_renderPass, nullptr);
+}
+
+void Swapchain::create(uint32_t width, uint32_t height)
+{
     VkSurfaceCapabilitiesKHR caps;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps);
+    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+        m_ctx.physicalDevice(), m_ctx.surface(), &caps));
 
-    uint32_t fmt_count;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &fmt_count, nullptr);
-    std::vector<VkSurfaceFormatKHR> formats(fmt_count);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &fmt_count, formats.data());
+    uint32_t formatCount = 0;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(m_ctx.physicalDevice(), m_ctx.surface(),
+                                         &formatCount, nullptr);
+    std::vector<VkSurfaceFormatKHR> formats(formatCount);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(m_ctx.physicalDevice(), m_ctx.surface(),
+                                         &formatCount, formats.data());
 
-    VkSurfaceFormatKHR chosen_fmt = formats[0];
-    for (auto& f : formats) {
-        if (f.format == VK_FORMAT_B8G8R8A8_SRGB &&
-            f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-            chosen_fmt = f;
+    // We do sRGB encoding manually in post.frag, so pick a UNORM format.
+    VkSurfaceFormatKHR chosen = formats[0];
+    for (const auto& f : formats)
+        if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
+            f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        {
+            chosen = f;
             break;
         }
-    }
-    format_ = chosen_fmt.format;
+    m_format = chosen.format;
 
-    extent_.width = std::clamp(width, caps.minImageExtent.width, caps.maxImageExtent.width);
-    extent_.height = std::clamp(height, caps.minImageExtent.height, caps.maxImageExtent.height);
+    if (caps.currentExtent.width != UINT32_MAX)
+        m_extent = caps.currentExtent;
+    else
+        m_extent = {std::clamp(width, caps.minImageExtent.width, caps.maxImageExtent.width),
+                    std::clamp(height, caps.minImageExtent.height, caps.maxImageExtent.height)};
 
-    uint32_t image_count = caps.minImageCount + 1;
-    if (caps.maxImageCount > 0) image_count = std::min(image_count, caps.maxImageCount);
+    uint32_t imageCount = caps.minImageCount + 1;
+    if (caps.maxImageCount > 0)
+        imageCount = std::min(imageCount, caps.maxImageCount);
 
-    VkSwapchainCreateInfoKHR ci{};
-    ci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-    ci.surface = surface;
-    ci.minImageCount = image_count;
-    ci.imageFormat = format_;
-    ci.imageColorSpace = chosen_fmt.colorSpace;
-    ci.imageExtent = extent_;
+    VkSwapchainKHR oldSwapchain = m_swapchain;
+
+    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    ci.surface = m_ctx.surface();
+    ci.minImageCount = imageCount;
+    ci.imageFormat = chosen.format;
+    ci.imageColorSpace = chosen.colorSpace;
+    ci.imageExtent = m_extent;
     ci.imageArrayLayers = 1;
-    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     ci.clipped = VK_TRUE;
+    ci.oldSwapchain = oldSwapchain;
+    VK_CHECK(vkCreateSwapchainKHR(m_ctx.device(), &ci, nullptr, &m_swapchain));
 
-    if (vkCreateSwapchainKHR(device, &ci, nullptr, &swapchain_) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create swapchain");
-    }
+    if (oldSwapchain)
+        vkDestroySwapchainKHR(m_ctx.device(), oldSwapchain, nullptr);
 
-    uint32_t actual_count;
-    vkGetSwapchainImagesKHR(device, swapchain_, &actual_count, nullptr);
-    images_.resize(actual_count);
-    vkGetSwapchainImagesKHR(device, swapchain_, &actual_count, images_.data());
+    uint32_t count = 0;
+    vkGetSwapchainImagesKHR(m_ctx.device(), m_swapchain, &count, nullptr);
+    m_images.resize(count);
+    vkGetSwapchainImagesKHR(m_ctx.device(), m_swapchain, &count, m_images.data());
+}
 
-    views_.resize(actual_count);
-    for (uint32_t i = 0; i < actual_count; i++) {
-        VkImageViewCreateInfo vci{};
-        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        vci.image = images_[i];
-        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vci.format = format_;
-        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        vci.subresourceRange.baseMipLevel = 0;
-        vci.subresourceRange.levelCount = 1;
-        vci.subresourceRange.baseArrayLayer = 0;
-        vci.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device, &vci, nullptr, &views_[i]) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create swapchain image view");
-        }
+void Swapchain::recreate(uint32_t width, uint32_t height)
+{
+    m_ctx.waitIdle();
+    cleanup();
+    create(width, height);
+
+    m_views.resize(m_images.size());
+    m_framebuffers.resize(m_images.size());
+    for (size_t i = 0; i < m_images.size(); ++i)
+    {
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = m_images[i];
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = m_format;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VK_CHECK(vkCreateImageView(m_ctx.device(), &vi, nullptr, &m_views[i]));
+
+        VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fb.renderPass = m_renderPass;
+        fb.attachmentCount = 1;
+        fb.pAttachments = &m_views[i];
+        fb.width = m_extent.width;
+        fb.height = m_extent.height;
+        fb.layers = 1;
+        VK_CHECK(vkCreateFramebuffer(m_ctx.device(), &fb, nullptr, &m_framebuffers[i]));
     }
 }
 
-void Swapchain::destroy(VkDevice device) {
-    for (auto v : views_) vkDestroyImageView(device, v, nullptr);
-    views_.clear();
-    if (swapchain_) {
-        vkDestroySwapchainKHR(device, swapchain_, nullptr);
-        swapchain_ = VK_NULL_HANDLE;
-    }
+void Swapchain::cleanup()
+{
+    for (auto fb : m_framebuffers)
+        vkDestroyFramebuffer(m_ctx.device(), fb, nullptr);
+    for (auto v : m_views)
+        vkDestroyImageView(m_ctx.device(), v, nullptr);
+    m_framebuffers.clear();
+    m_views.clear();
 }
 
-} // namespace bh2::vk
+} // namespace vk

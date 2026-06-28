@@ -1,151 +1,150 @@
+# blackhole4 — physically-based Kerr black hole renderer
 
-A real-time Kerr black hole renderer running entirely on the GPU. Null geodesics are integrated in Boyer-Lindquist coordinates using a Hamiltonian formulation, with full frame-dragging and gravitational lensing from a spinning (Kerr) black hole. Two modes: an interactive preview at whatever resolution you want, and an offline path that accumulates samples and writes a full 32-bit EXR.
+Real-time GPU renderer for a spinning (Kerr) black hole, written in C++20 and
+Vulkan 1.2. Null geodesics are integrated in Boyer-Lindquist coordinates in a
+compute shader, one ray per thread, with a relativistic thin accretion disk,
+optional NanoVDB volumetrics, HDR skybox far-field and ACES post-processing.
 
-## Blog Post going over the creation of this project: 
-> [blog.harrison-martin.com](https://blog.harrison-martin.com/black-holes)
+![sample render](test_render.png)
 
----
+## Building
 
-<img width="3840" height="2160" alt="BlackHole 4k" src="https://github.com/user-attachments/assets/48c4038c-0993-40c2-9cf1-b4f1b7c728ff" />
-
-[Full Resoultion 4k](https://cloud.harrison-martin.com/apps/files_sharing/publicpreview/ffkFMd5KfHpi432?file=/&fileId=1024597&x=3840&y=2160&a=true&etag=248e349ae73d7ebfcc93374acc8bbed5)
-
-
-
-<img width="3840" height="2160" alt="Closeup 4k" src="https://github.com/user-attachments/assets/0f69e0c2-0b8a-4e22-9722-45f0b1af211e" />
-
-[Full Resoultion 4k](https://cloud.harrison-martin.com/apps/files_sharing/publicpreview/YYxL8L6WJs4Q3id?file=/&fileId=1024708&x=3840&y=2160&a=true&etag=e9e4838af21c4ad6d5dea25efe4acf93)
-
-## How it works
-
-Each pixel launches a ray backward in time. The shader integrates the geodesic equations of motion — five coupled ODEs for `(r, θ, φ, p_r, p_θ)` — until the ray either falls inside the event horizon, escapes to the far-field radius, or hits the accretion disk. The conserved quantities `E`, `L_z`, and the Carter constant `Q` are computed once per ray at camera setup and carried through the integration.
-
-The integrator options are:
-
-- **RK4** — fixed affine-parameter steps, fast and predictable
-- **RKF45** — Cash-Karp adaptive stepping with error control; tighter geodesics near the photon sphere at the cost of variable step count
-
-Disk emission uses blackbody spectra with a relativistic frequency-shift factor `g = ν_obs / ν_emit` computed from the Keplerian 4-velocity of the orbiting fluid. Alternatively, you can load a Houdini `.vdb` file with density and temperature grids; the shader samples it via NanoVDB SSBOs.
-
-The full pipeline: `trace.comp.glsl` → HDR accumulation image → `tonemap.frag.glsl` → swapchain.
-
-## Requirements
-
-- Vulkan 1.2 SDK (set `VULKAN_SDK` or have `glslc` on `PATH`)
-- C++20 compiler (MSVC 2022, Clang 16+, GCC 13+)
-- CMake 3.24+
-
-Everything else — GLFW, GLM, VMA, ImGui, TinyEXR, stb, NanoVDB — is fetched automatically by CMake.
-
-For `.vdb` file support, build with `-DBH2_USE_OPENVDB=ON` and install OpenVDB via vcpkg:
+Requirements: CMake ≥ 3.24, a C++20 compiler, the Vulkan SDK (for `glslc` and
+`vulkan-1`), and an internet connection on first configure (all third-party
+libraries are pulled with FetchContent: GLFW, GLM, VMA, Dear ImGui, TinyEXR,
+stb, and the NanoVDB headers from the OpenVDB repository).
 
 ```
-vcpkg install openvdb:x64-windows
-```
-
-## Build
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build
 cmake --build build --config Release
 ```
 
-Shaders are compiled to SPIR-V as part of the build. If `glslc` isn't found, CMake will warn and you'll need to compile them manually.
+Targets: `blackhole4` (the renderer) and `make_test_volume` (writes a
+procedural accretion-torus `.nvdb` for testing the volumetric path).
+Set `-DBH_WITH_NANOVDB=OFF` to drop the NanoVDB dependency.
 
-## Usage
+## Running
 
-```
-blackhole2 [options]
-```
-
-**Modes**
-```
---preview              Interactive window (default)
---offline              Accumulate samples and write EXR
-```
-
-**Black hole**
-```
---spin <a/M>           Dimensionless spin [0, 0.998]  (default: 0.998, near-extremal)
---mass <M>             Mass in geometric units         (default: 1.0)
-```
-
-**Camera** — Boyer-Lindquist coordinates
-```
---cam-r <r>            Radial distance                 (default: 30)
---cam-theta <deg>      Polar angle                     (default: 80°, near equatorial)
---cam-phi <deg>        Azimuthal angle                 (default: 0°)
---fov <deg>            Full fisheye FOV                (default: 180°)
-```
-
-**Disk**
-```
---vdb <path>           Houdini .vdb with density+temperature grids
---disk-temp <K>        Analytic disk base temperature  (default: 5000 K)
---no-disk              Disable the accretion disk entirely
-```
-
-**Rendering**
-```
---skybox <path>        HDR or EXR panorama for background
---width / --height     Preview resolution              (default: 1024×1024)
---steps <n>            Max integration steps per ray   (default: 5000)
---step-size <s>        Fixed affine step size          (default: 0.05)
---adaptive             Switch to RKF45 adaptive integrator
---tolerance <tol>      RKF45 error tolerance           (default: 1e-6)
-```
-
-**Offline output**
-```
---out-width / --out-height    Output resolution        (default: 4096×4096)
---samples <n>                 Samples per pixel        (default: 64)
---output <path>               EXR output path          (default: output.exr)
-```
-
-**Display**
-```
---exposure <e>         Tonemap exposure                (default: 1.0)
---gamma <g>            Gamma correction                (default: 2.2)
-```
-
-### Example — near-extremal spin, equatorial view
-
-```bash
-blackhole2 --spin 0.998 --cam-theta 90 --cam-r 20 --skybox milkyway.hdr
-```
-
-### Example — high-quality offline render
-
-```bash
-blackhole2 --offline --spin 0.9 --adaptive --tolerance 1e-7 \
-           --samples 256 --out-width 4096 --out-height 4096 \
-           --output bh_4k.exr
-```
-
-## Project structure
+Interactive preview (drag to orbit, scroll to zoom, ImGui panel for all
+physics/render parameters):
 
 ```
-shaders/
-  kerr.glsl          geodesic integrator (RK4 + RKF45), Kerr metric helpers
-  trace.comp.glsl    main ray-tracing compute shader
-  disk.glsl          accretion disk emission + NanoVDB sampling
-  blackbody.glsl     blackbody spectrum, frequency-shift (g-factor)
-  sky.glsl           skybox sampling
-  tonemap.frag.glsl  ACES/gamma tonemapping
-  fullscreen.vert.glsl
-
-src/
-  app/               application loop, camera, offline renderer, config
-  vk/                Vulkan wrappers (instance, device, swapchain, pipelines, VMA allocator)
-  io/                HDR loader (stb), EXR writer (TinyEXR), VDB loader (NanoVDB/OpenVDB)
+build/Release/blackhole4 --spin 0.9
 ```
 
-## Physics notes
+Offline render (headless, progressive accumulation, 32-bit float EXR):
 
-Coordinates are Boyer-Lindquist with geometrized units `G = c = 1`. All lengths are in units of the black hole mass `M`. The integrator propagates the Hamiltonian form `H = ½ g^{μν} p_μ p_ν = 0` for null geodesics. The inner disk boundary defaults to the prograde ISCO, computed analytically from the spin parameter.
+```
+build/Release/blackhole4 --offline --width 1920 --height 1080 --spp 512 \
+    --spin 0.95 --out render.exr
+```
 
-The disk emission model accounts for gravitational redshift and the Doppler shift of the orbiting plasma. For full volumetric accretion disk structure, load a `.vdb` file exported from Houdini or any tool that writes the OpenVDB format.
+Volumetric gas from a NanoVDB file:
 
-## License
+```
+build/Release/make_test_volume test_volume.nvdb
+build/Release/blackhole4 --vdb test_volume.nvdb
+```
 
-MIT
+### OpenVDB `.vdb` files and sequences (Houdini exports)
+
+Reading native `.vdb` files (blosc-compressed OpenVDB, the Houdini default)
+requires the OpenVDB core library. Build it once into `extern/install`, then
+re-run CMake — it is picked up automatically:
+
+```
+powershell -File scripts\build_openvdb.ps1   # zlib + c-blosc + oneTBB + OpenVDB
+cmake -S . -B build
+cmake --build build --config Release
+```
+
+`--vdb` then accepts a `.vdb` file **or a directory containing a numbered
+sequence** (sorted by filename). Grids named `*dens*` / `*temp*` are used as
+density and temperature; with a density-only export the gas temperature falls
+back to the thin-disk Shakura-Sunyaev profile at each sample's cylindrical
+radius, so the volume still glows physically.
+
+```
+# interactive: scrub the sequence with the "seq frame" slider
+build/Release/blackhole4 --vdb E:\path\to\sequence_dir --vdbscale 1.0
+
+# offline animation: one EXR per frame (out.0001.exr, out.0002.exr, ...)
+build/Release/blackhole4 --offline --vdb E:\path\to\sequence_dir ^
+    --seqstart 1 --seqend 240 --spp 256 --out out.exr
+```
+
+Volume options: `--vdbscale` (renderer M per VDB world unit), `--vdbyup 0|1`
+(Houdini is Y-up, the renderer Z-up; default 1), `--vdbres` (dense bake
+resolution, default 256), `--seqstart/--seqend/--seqstep` (1-based frame
+range; offline renders the range, preview starts at `--seqstart`).
+
+`--help` lists all options (skybox, camera, integrator, disk parameters,
+validation layers, debug views).
+
+## Physics
+
+Geometric units G = c = M = 1; lengths in units of the gravitational radius.
+
+- **Metric**: Kerr in Boyer-Lindquist coordinates, dimensionless spin
+  a ∈ [0, 0.998]. Inverse-metric components and all their analytic r/θ
+  derivatives live in `shaders/kerr.glsl` — no finite differences anywhere.
+- **Geodesics**: integrated from the super-Hamiltonian
+  H = ½ g^{μν} p_μ p_ν = 0. Stationarity and axisymmetry reduce the problem
+  to five coupled ODEs for (r, θ, φ, p_r, p_θ); E = −p_t and L_z = p_φ are
+  algebraically conserved.
+- **Conserved quantities**: E, L_z and the Carter constant Q are computed at
+  the camera. Q is the integration-error metric: debug view 1 renders its
+  drift |Q(λ) − Q₀| in false color (`--debug 1`). Measured at 0.9 spin,
+  640×360: median drift ≈ 4e-5 (RKF45, tol 1e-6) and ≈ 6e-5 (RK4).
+- **Integrators** (`shaders/integrators.glsl`): fixed-step RK4 with a
+  radius- and horizon-proximity-scaled step, and adaptive RKF45 with the
+  Cash-Karp 5(4) embedded pair and per-component error control.
+- **Camera**: rays start with unit energy in the local orthonormal frame of a
+  ZAMO/FIDO (zero-angular-momentum observer) at the camera; the tetrad
+  construction is in `kerr.glsl: cameraRay`.
+- **Accretion disk** (`shaders/disk.glsl`): thin equatorial disk from the
+  ISCO (computed per spin via Bardeen-Press-Teukolsky) to a configurable
+  outer radius. The fluid follows prograde circular geodesics with Keplerian
+  Ω = 1/(r^{3/2} + a); the relativistic shift factor is
+  g = ν_obs/ν_em = 1/(u^t (E − Ω L)), which contains Doppler beaming,
+  gravitational redshift, and time dilation in one expression.
+- **Emission**: Shakura-Sunyaev temperature profile
+  T(r) ∝ (r_in/r)^{3/4} (1 − √(r_in/r))^{1/4}, peak normalized to the UI
+  temperature. Color comes from a CPU-baked LUT of the Planck spectrum
+  integrated against the CIE 1931 color matching functions (Wyman et al.
+  analytic fits) with an *absolute* radiometric scale. Because a
+  Doppler-shifted blackbody is exactly a blackbody at gT, a single LUT lookup
+  at gT yields the correct shifted *and* beamed radiance — no separate g³/g⁴
+  factor.
+- **Volumetrics** (`shaders/volume.glsl`): NanoVDB grids are loaded on the
+  CPU and baked into dense 3D textures (hardware trilinear filtering); each
+  geodesic step is sub-sampled in pseudo-Cartesian space with emission from
+  the blackbody LUT (Doppler-shifted by the local Keplerian flow) and
+  exponential extinction.
+- **Far field**: rays that pass r = 1000 M moving outward sample an
+  equirectangular HDR/EXR skybox along their asymptotic direction (or a
+  procedural starfield if none is given).
+
+## Architecture
+
+```
+src/vk/        Vulkan wrappers: Context (instance/device/queue/VMA),
+               Swapchain (+render pass), Resources (Buffer/Image via VMA),
+               Pipeline (compute + fullscreen graphics)
+src/app/       Camera (orbit + ZAMO-frame basis), Config (CLI), Blackbody
+               (Planck/CIE LUT), AssetLoad (HDR/EXR skybox, NanoVDB bake),
+               Renderer (descriptors, accumulation, preview loop, offline EXR)
+shaders/       trace.comp (per-ray kernel) + common/kerr/integrators/disk/
+               env/volume includes; post.vert/post.frag (ACES + sRGB)
+tools/         make_test_volume (procedural .nvdb generator)
+```
+
+- **Preview**: one compute dispatch per frame accumulates 1 jittered sample
+  per pixel into an RGBA32F storage image; any parameter or camera change is
+  detected by hashing the UBO and restarts accumulation. A fragment pass
+  resolves (divide by sample count), applies exposure + ACES (Hill fit) and
+  sRGB encoding, then ImGui draws on top.
+- **Offline**: same kernel, headless context (no surface/swapchain). Samples
+  are batched 16 dispatches per submit with compute→compute barriers, the
+  sample index supplied by push constant, then the accumulator is read back,
+  averaged and written as 32-bit float RGB EXR via TinyEXR.

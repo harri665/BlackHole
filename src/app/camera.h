@@ -1,24 +1,40 @@
+// Camera — orbit camera around the hole. Produces the Boyer-Lindquist
+// position and the orientation basis used to build the photon's initial
+// direction in the local FIDO (ZAMO) frame.
+//
+// The basis vectors are expressed in components along the local orthonormal
+// spatial triad (rhat, thetahat, phihat) of the ZAMO tetrad; the shader
+// (kerr.glsl: cameraRay) turns a direction in that frame into the photon's
+// conserved quantities. For computing the *orientation* (look-at) we treat
+// the BL coordinates as flat spherical coordinates — this only fixes where
+// the camera points, not any physics.
 #pragma once
-#include "app/config.h"
 
-namespace bh2 {
+#include <glm/glm.hpp>
 
-class Camera {
+namespace app {
+
+class Camera
+{
 public:
-    void update_from_config(RenderConfig& cfg);
+    float distance = 28.0f;       // BL radius r
+    float azimuthDeg = 0.0f;
+    float elevationDeg = 8.0f;    // above equatorial plane
+    float fovYDeg = 55.0f;
 
-    void orbit(float d_theta, float d_phi);
-    void zoom(float dr);
-    void set_position(float r, float theta, float phi);
+    struct Frame
+    {
+        glm::vec3 posBL;    // r, theta, phi
+        glm::vec3 right;    // components along (rhat, thhat, phhat)
+        glm::vec3 up;
+        glm::vec3 fwd;
+        float tanHalfFov;
+    };
 
-    float r() const { return r_; }
-    float theta() const { return theta_; }
-    float phi() const { return phi_; }
+    Frame computeFrame() const;
 
-private:
-    float r_ = 30.0f;
-    float theta_ = 1.4f;
-    float phi_ = 0.0f;
+    void orbit(float dxPixels, float dyPixels);
+    void zoom(float scrollSteps, float rMin);
 };
 
-} // namespace bh2
+} // namespace app

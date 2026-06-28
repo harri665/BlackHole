@@ -1,27 +1,41 @@
+// Swapchain — surface swapchain, image views, a single-attachment render pass
+// and framebuffers for the post-process + UI pass.
 #pragma once
-#include <vulkan/vulkan.h>
-#include <vector>
 
-namespace bh2::vk {
+#include "Context.h"
 
-class Swapchain {
+namespace vk {
+
+class Swapchain
+{
 public:
-    void init(VkPhysicalDevice physical, VkDevice device, VkSurfaceKHR surface,
-              uint32_t width, uint32_t height, uint32_t graphics_family);
-    void destroy(VkDevice device);
+    Swapchain(const Context& ctx, uint32_t width, uint32_t height);
+    ~Swapchain();
 
-    VkSwapchainKHR handle() const { return swapchain_; }
-    VkFormat format() const { return format_; }
-    VkExtent2D extent() const { return extent_; }
-    const std::vector<VkImageView>& image_views() const { return views_; }
-    uint32_t image_count() const { return static_cast<uint32_t>(views_.size()); }
+    Swapchain(const Swapchain&) = delete;
+    Swapchain& operator=(const Swapchain&) = delete;
+
+    void recreate(uint32_t width, uint32_t height);
+
+    VkSwapchainKHR handle() const { return m_swapchain; }
+    VkRenderPass renderPass() const { return m_renderPass; }
+    VkFramebuffer framebuffer(uint32_t i) const { return m_framebuffers[i]; }
+    VkExtent2D extent() const { return m_extent; }
+    VkFormat format() const { return m_format; }
+    uint32_t imageCount() const { return static_cast<uint32_t>(m_images.size()); }
 
 private:
-    VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
-    VkFormat format_;
-    VkExtent2D extent_;
-    std::vector<VkImage> images_;
-    std::vector<VkImageView> views_;
+    void create(uint32_t width, uint32_t height);
+    void cleanup();
+
+    const Context& m_ctx;
+    VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
+    VkRenderPass m_renderPass = VK_NULL_HANDLE;
+    std::vector<VkImage> m_images;
+    std::vector<VkImageView> m_views;
+    std::vector<VkFramebuffer> m_framebuffers;
+    VkExtent2D m_extent{};
+    VkFormat m_format = VK_FORMAT_UNDEFINED;
 };
 
-} // namespace bh2::vk
+} // namespace vk

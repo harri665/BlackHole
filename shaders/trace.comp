@@ -1,0 +1,176 @@
+// trace.comp — one thread per ray. Backward ray tracing: a null geodesic is
+// launched from the camera into the scene and integrated until it falls
+// through the horizon, escapes past rFar, or its throughput is exhausted.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D accumImage;
+
+// Per-dispatch sample index. A push constant (not part of the UBO) so that
+// offline mode can batch many one-sample dispatches into one command buffer.
+layout(push_constant) uniform Push { uint frameIndex; } pc;
+
+#include "common.glsl"
+#include "kerr.glsl"
+#include "disk.glsl"
+#include "env.glsl"
+#include "volume.glsl"
+#include "integrators.glsl"
+
+void main()
+{
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 res = ivec2(u.frame.y, u.frame.z);
+    if (pix.x >= res.x || pix.y >= res.y)
+        return;
+
+    uint frameIdx = pc.frameIndex;
+    uint seed = uint(pix.x) * 1973u + uint(pix.y) * 9277u + frameIdx * 26699u + 1u;
+
+    // ------------------------------------------------------------ camera ray
+    // Sub-pixel jitter for progressive antialiasing (skipped on frame 0 so
+    // the first preview frame is crisp).
+    vec2 jitter = frameIdx == 0u ? vec2(0.5) : vec2(rand01(seed), rand01(seed));
+    vec2 ndc = ((vec2(pix) + jitter) / vec2(res)) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+
+    float tanHalfFov = u.camPos.w;
+    float aspect = u.camRight.w;
+    vec3 dirCam = normalize(vec3(ndc.x * tanHalfFov * aspect, ndc.y * tanHalfFov, 1.0));
+
+    // local-frame direction, components along (rhat, thetahat, phihat)
+    vec3 n = normalize(dirCam.x * u.camRight.xyz
+                     + dirCam.y * u.camUp.xyz
+                     + dirCam.z * u.camFwd.xyz);
+
+    float a = u.bh.x;
+    float rHorizon = u.bh.y;
+    float rFar = u.bh.w;
+
+    GeoState y;
+    y.r  = u.camPos.x;
+    y.th = u.camPos.y;
+    y.ph = u.camPos.z;
+
+    float E, L;
+    cameraRay(y.r, y.th, n, a, E, L, y.pr, y.pth);
+    float Q0 = carterConstant(y, E, L, a);
+
+    // -------------------------------------------------------- integration
+    float hInit = u.integ.x;
+    float tol = u.integ.y;
+    int maxSteps = int(u.integ.z);
+    bool adaptive = u.integ.w > 0.5;
+    // Inside a volume, geodesic steps are chords subdivided linearly for the
+    // ray march; cap the step so those chords stay shorter than a few voxels,
+    // otherwise thin slabs show banding.
+    float hMin = 1e-5, hMax = volumeEnabled() ? 1.0 : 4.0;
+
+    vec3 radiance = vec3(0.0);
+    float transmittance = 1.0;
+    bool escaped = false;
+    int steps = 0;
+
+    float h = adaptive ? hInit : 0.0;
+    vec3 pCartPrev = blToCartesian(y.r, y.th, y.ph);
+
+    for (steps = 0; steps < maxSteps; ++steps)
+    {
+        GeoState yPrev = y;
+
+        if (adaptive)
+        {
+            if (!rkf45Step(y, h, E, L, a, tol, hMin, hMax))
+                continue; // step rejected and h shrunk; retry
+        }
+        else
+        {
+            // fixed RK4 with a radius-scaled step: fine near the hole,
+            // coarse in the asymptotically flat region. The (r - r+) factor
+            // shrinks the step further on horizon-grazing rays, where the
+            // BL-coordinate equations become stiff.
+            float prox = clamp(2.0 * (y.r - rHorizon) / y.r, 0.05, 1.0);
+            float hs = clamp(hInit * y.r * 0.5 * prox, hInit * 0.05, hMax);
+            rk4Step(y, hs, E, L, a);
+        }
+
+        // ------------------------------------------------- volumetric gas
+        vec3 pCart = blToCartesian(y.r, y.th, y.ph);
+        if (volumeEnabled())
+        {
+            volumeMarch(pCartPrev, pCart, E, L, radiance, transmittance);
+            if (transmittance < 1e-3)
+                break;
+        }
+        pCartPrev = pCart;
+
+        // ------------------------------------------- thin-disk intersection
+        // Detect an equatorial-plane crossing between consecutive states and
+        // locate it by linear interpolation across the step.
+        float f0 = yPrev.th - HALF_PI;
+        float f1 = y.th - HALF_PI;
+        if (f0 * f1 < 0.0)
+        {
+            float w = f0 / (f0 - f1);
+            float rHit = mix(yPrev.r, y.r, w);
+            float phHit = mix(yPrev.ph, y.ph, w);
+            if (rHit >= u.disk.x && rHit <= u.disk.y)
+            {
+                float alpha;
+                vec3 c = shadeDisk(rHit, phHit, E, L, alpha);
+                radiance += transmittance * c * alpha;
+                transmittance *= 1.0 - alpha;
+                if (transmittance < 1e-3)
+                    break;
+            }
+        }
+
+        // ---------------------------------------------------- termination
+        if (y.r < rHorizon * 1.01)
+            break; // captured: contributes nothing
+
+        // dr/dlambda = g^rr p_r and g^rr > 0 outside the horizon, so p_r > 0
+        // means the ray is moving outward.
+        if (y.r > rFar && y.pr > 0.0)
+        {
+            escaped = true;
+            break;
+        }
+    }
+
+    if (escaped)
+    {
+        // Asymptotic direction from the final position/momentum, converted
+        // to a Cartesian unit vector via the flat spherical frame (valid at
+        // r >> M where the metric is asymptotically Minkowski).
+        GeoState d;
+        geodesicRHS(y, E, L, a, d);
+        float s = sin(y.th), c = cos(y.th);
+        float cp = cos(y.ph), sp = sin(y.ph);
+        vec3 rhat  = vec3(s * cp, s * sp, c);
+        vec3 thhat = vec3(c * cp, c * sp, -s);
+        vec3 phhat = vec3(-sp, cp, 0.0);
+        vec3 dir = d.r * rhat + y.r * d.th * thhat + y.r * s * d.ph * phhat;
+        radiance += transmittance * sampleEnvironment(dir);
+    }
+
+    // ------------------------------------------------------------ debug views
+    float debugView = u.frame.w;
+    if (debugView == 1.0)
+    {
+        // Carter constant drift: integration error metric. Mid-gray = 1e-6.
+        float dQ = abs(carterConstant(y, E, L, a) - Q0);
+        float v = clamp((log2(dQ + 1e-20) + 40.0) / 40.0, 0.0, 1.0);
+        radiance = vec3(v, 1.0 - v, 0.1);
+    }
+    else if (debugView == 2.0)
+    {
+        radiance = vec3(float(steps) / float(maxSteps));
+    }
+
+    // ---------------------------------------------------------- accumulation
+    vec4 prev = frameIdx == 0u ? vec4(0.0) : imageLoad(accumImage, pix);
+    imageStore(accumImage, pix, prev + vec4(radiance, 1.0));
+}
