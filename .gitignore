@@ -31,55 +31,37 @@
 *.out
 *.app
 
+# Build directory
+build/
+bin/
+out/
+extern/
+
 # CMake
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/
-Testing/
 Makefile
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
 _deps/
-build/
 
-# Visual Studio
+# IDE / Editor
+.vscode/
 .vs/
-*.sln
-*.vcxproj
-*.vcxproj.filters
-*.vcxproj.user
 *.suo
-*.db
-*.opendb
-*.sdf
-*.ipch
-*.ilk
-*.pdb
-*.exp
-*.log
-*.tlog
-*.lastbuildstate
-*.idb
-*.recipe
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.idea/
 
-# User-specific files
-*.user
-*.userosscache
-*.sln.docstates
+# Application specific
+imgui.ini
 
-# Shaders (if compiled)
-*.spv
-
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Other
-.claude/
+# Output files
+*.exr
+*.png
+*.nvdb
